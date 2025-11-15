@@ -407,6 +407,13 @@ struct llama_layer {
     struct llama_layer_shortconv shortconv;
 
     struct llama_layer_nextn nextn;
+
+    // merged MoE
+    struct ggml_tensor * ffn_gate_exps_merged   = nullptr;
+    struct ggml_tensor * ffn_down_exps_merged   = nullptr;
+    struct ggml_tensor * ffn_up_exps_merged     = nullptr;
+    struct ggml_tensor * ffn_gate_inp_merged    = nullptr;
+    struct ggml_tensor * ffn_exp_probs_b_merged = nullptr;
 };
 
 struct llama_model {

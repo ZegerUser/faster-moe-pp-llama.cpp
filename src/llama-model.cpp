@@ -5003,6 +5003,16 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                             layer.ffn_up_exps = create_tensor(
                                 tn(LLM_TENSOR_FFN_UP_EXPS, "weight", i), { n_embd, n_ff_exp, n_expert }, flags);
 
+                            layer.ffn_gate_exps_merged = create_tensor(
+                                tn(LLM_TENSOR_FFN_GATE_EXPS, "merged.weight", i), { n_embd, n_ff_exp, 8 }, TENSOR_NOT_REQUIRED);
+                            layer.ffn_down_exps_merged = create_tensor(
+                                tn(LLM_TENSOR_FFN_DOWN_EXPS, "merged.weight", i), { n_ff_exp, n_embd, 8 }, TENSOR_NOT_REQUIRED);
+                            layer.ffn_up_exps_merged = create_tensor(
+                                tn(LLM_TENSOR_FFN_UP_EXPS, "merged.weight", i), { n_embd, n_ff_exp, 8 }, TENSOR_NOT_REQUIRED);
+
+                            layer.ffn_gate_inp_merged = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "merged.weight", 0), { n_embd, 8 }, TENSOR_NOT_REQUIRED);
+                            layer.ffn_exp_probs_b_merged = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "merged.bias", 0), { 8 }, TENSOR_NOT_REQUIRED);
+
                             // Shared expert
                             if (n_expert_shared > 0) {
                                 const int64_t n_ff_shexp = n_ff_exp * n_expert_shared;

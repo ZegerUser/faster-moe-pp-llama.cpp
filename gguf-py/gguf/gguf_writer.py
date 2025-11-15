@@ -137,7 +137,7 @@ class GGUFWriter:
 
                 size = prod(shape)
 
-                if "_exps." in name:
+                if "_exps.w" in name:
                     expert_count = shape[-2 if ".bias" in name else -3]
                     expert_params += (size // expert_count)
                     expert_sum += expert_count

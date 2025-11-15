@@ -17,6 +17,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterable, Iterator, Literal, Sequence, TypeVar, cast
 from itertools import chain
 from transformers import AutoConfig
+from sklearn.cluster import KMeans
 
 import math
 import numpy as np
@@ -7838,6 +7839,7 @@ class Glm4MoeModel(TextModel):
         # GLM4_MOE has num_hidden_layers + 1 actual layers (including NextN layer)
         self.block_count = self.hparams["num_hidden_layers"] + self.hparams.get("num_nextn_predict_layers", 0)
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
+        self.added_shared = False
 
     def set_vocab(self):
         from transformers import AutoTokenizer
@@ -7903,18 +7905,16 @@ class Glm4MoeModel(TextModel):
     _experts: list[dict[str, Tensor]] | None = None
 
     def modify_tensors(
-        self, data_torch: Tensor, name: str, bid: int | None
+            self, data_torch: Tensor, name: str, bid: int | None
     ) -> Iterable[tuple[str, Tensor]]:
         if name.startswith("model.visual."):  # ignore visual part
             return []
         elif name.startswith("model.language_model."):
             name = name.replace("language_model.", "")  # for multimodal variants
 
-        # Handle main token embedding (but not layer-specific NextN embeddings)
         if name == "model.embed_tokens.weight" and ".layers." not in name:
             return [(self.map_tensor_name("token_embd.weight"), data_torch)]
 
-        # Handle routed experts
         if name.find("mlp.experts") != -1:
             n_experts = self.hparams["n_routed_experts"]
             assert bid is not None
@@ -7927,6 +7927,32 @@ class Glm4MoeModel(TextModel):
             if len(self._experts[bid]) >= n_experts * 3:
                 tensors: list[tuple[str, Tensor]] = []
 
+                if not self.added_shared:
+                    print("Forging shared merged router tensors...")
+                    n_embd = self.hparams["hidden_size"]
+                    n_super_experts = 8
+
+                    # Create a zero-filled gate weight tensor. Shape: [n_embd, 8]
+                    # This ensures token content does not affect routing.
+                    gate_inp_merged = torch.zeros(
+                        (n_super_experts, n_embd), dtype=torch.float32
+                    )
+                    tensors.append((f"blk.0.ffn_gate_inp.merged.weight", gate_inp_merged))
+
+                    # Create a zero-filled bias tensor. Shape: [8]
+                    # A zero logit input to softmax results in a uniform distribution.
+                    exp_probs_b_merged = torch.zeros(
+                        (n_super_experts,), dtype=torch.float32
+                    )
+                    tensors.append((f"blk.0.exp_probs_b.merged.bias", exp_probs_b_merged))
+                    self.added_shared = True
+
+                w_name_to_name = {
+                    "down_proj": "ffn_down_exps",
+                    "up_proj": "ffn_up_exps",
+                    "gate_proj": "ffn_gate_exps",
+                }
+
                 # merge the experts into a single 3d tensor
                 for w_name in ["down_proj", "gate_proj", "up_proj"]:
                     datas: list[Tensor] = []
@@ -7937,11 +7963,23 @@ class Glm4MoeModel(TextModel):
                         del self._experts[bid][ename]
 
                     data_torch = torch.stack(datas, dim=0)
-
                     merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
-
                     new_name = self.map_tensor_name(merged_name)
                     tensors.append((new_name, data_torch))
+
+                    original_shape = data_torch.shape
+                    n_experts = original_shape[0]
+                    flattened_weights = data_torch.view(n_experts, -1).numpy()
+                    kmeans = KMeans(n_clusters=8, random_state=44, n_init='auto', verbose=1)
+                    kmeans.fit(flattened_weights)
+                    super_expert_weights_flat = kmeans.cluster_centers_
+                    super_expert_tensor_np = super_expert_weights_flat.reshape(
+                        8, *original_shape[1:]
+                    )
+                    super_expert_tensor = torch.from_numpy(super_expert_tensor_np).to(data_torch.dtype)
+                    gguf_name_merged = f"blk.{bid}.{w_name_to_name[w_name]}.merged.weight"
+                    tensors.append((gguf_name_merged, super_expert_tensor))
+
                 return tensors
             else:
                 return []
@@ -7950,7 +7988,6 @@ class Glm4MoeModel(TextModel):
             name = name.replace("e_score_correction_bias", "e_score_correction.bias")
 
         new_name = self.map_tensor_name(name)
-
         return [(new_name, data_torch)]
 
     def prepare_tensors(self):
